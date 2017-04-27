@@ -16,7 +16,9 @@
 #define MEDIUM 0x30
 #define FAST 0x80
 
-#define KEY 5
+#define KEY 2
+#define SOLVED_STEPS_KEY 7
+#define NUM_SOLVED_STEPS_KEY 1
 
 // global variable
 volatile uint8_t done = 0; // this counts how many sensors have fired
@@ -29,8 +31,8 @@ volatile uint8_t whichOneCount;
 volatile uint8_t compareVal;
 volatile uint8_t lastLightDark;
 volatile int lost = 0;
-volatile uint8_t solvedSteps[100]; // assume there are no more than 100 turns. 0 left turn, 1 u turn, 2 forward, 3 right
-volatile int stepCounter = 0;
+uint8_t solvedSteps[100]; // assume there are no more than 100 turns. 0 left turn, 1 u turn, 2 forward, 3 right
+uint8_t stepCounter = 0;
 volatile uint8_t newTurn = 0;
 volatile uint8_t finishedturning = 1;
 volatile uint8_t solved = 0;
@@ -38,10 +40,10 @@ volatile uint16_t checking = 0;
 volatile uint8_t lostTurn = 0; // 1 for left, 2 for right
 volatile uint8_t turn = 0;
 volatile uint8_t confirmReading = 0;
-uint8_t numSolvedSteps;
 uint8_t stepNum;
 uint8_t testSteps[100];
 volatile uint8_t doneCounter = 0;
+uint8_t actualNumSteps = 0;
 uint8_t correctedSteps[100];
 
 
@@ -70,7 +72,7 @@ void getLightDark(void);
 
 void checkIfDone(void);
 
-uint8_t * convertTurns(uint8_t * pre, int numTurns, int *postTurns);
+uint8_t convertTurns(uint8_t * pre, uint8_t *post, uint8_t numTurns);
 
 
 // ISRs
@@ -126,11 +128,16 @@ int main(void)
 	
 	if(hasBeenSolved == KEY ) {
 		stepCounter = eeprom_read_byte((uint8_t *)2);
-		numSolvedSteps = eeprom_read_byte((uint8_t*)1);
-		eeprom_read_block(solvedSteps, (uint8_t *) 4, numSolvedSteps);
+		actualNumSteps = eeprom_read_byte((uint8_t*) NUM_SOLVED_STEPS_KEY);
+		for(int i = 0; i <actualNumSteps; ++i) {
+			solvedSteps[i] = eeprom_read_byte((uint8_t *)(SOLVED_STEPS_KEY + i));
+		}
 		int stepNum = 0;
+		for(int i = 0; i < 100; ++i) {
+			testSteps[i] = eeprom_read_byte((uint8_t *)(100 + i));
+		}
 		eeprom_read_block(testSteps, (uint8_t *) 100, 100);
-		while(stepNum < numSolvedSteps) {
+		while(stepNum < actualNumSteps) {
 			getLightDark();
 			
 			if(lightdark & 0b00010001) {
@@ -142,8 +149,8 @@ int main(void)
 				}
 				if((lightdark & 0b00000100) || ((options & 0b00010001) == 0b00010001)) { // the first condition implies that there is the option to go forward; the second condition implies there is the option to go left or right
 					// indicates we need to choose a turn
-					uint8_t direction = solvedSteps[stepNum++];
-					if(solvedSteps[stepNum] == 0) {
+					uint8_t direction = solvedSteps[stepNum];
+					if(direction == 0) {
 						turnLeft(MEDIUM); // next turn until the middle sensor sees nothing
 						uint8_t confirmReading = 0;
 						uint8_t lastReading;
@@ -172,13 +179,13 @@ int main(void)
 						}
 						
 				} 
-				else if(solvedSteps[stepNum] == 2) {
+				else if(direction == 2) {
 					forward(SLOW);
 					while((lightdark & 0b00010001)) {
 						getLightDark();
 					}
 				}
-				else if(solvedSteps[stepNum] == 3) {
+				else if(direction == 3) {
 					turnRight(MEDIUM); // next turn until the middle sensor sees nothing
 					uint8_t confirmReading = 0;
 					uint8_t lastReading;
@@ -226,10 +233,10 @@ int main(void)
 				forward(MEDIUM);
 			}
 			else if(lightdark & 0b00001000) {
-				turnRight(SLOW);
+				turnRight(MEDIUM);
 			}
 			else if(lightdark & 0b00000010) {
-				turnLeft(SLOW);
+				turnLeft(MEDIUM);
 			}
 		}
 		
@@ -248,15 +255,15 @@ int main(void)
 					
 					eeprom_write_byte((uint8_t *) 2, stepCounter);
 					
-					int actualNumSteps = 0;
-					uint8_t * correctedSteps = convertTurns(solvedSteps, correctedSteps, &actualNumSteps);
+					actualNumSteps = convertTurns(solvedSteps, correctedSteps, actualNumSteps);
 					
 					
-					eeprom_write_byte((uint8_t *)1, actualNumSteps);
-					eeprom_write_block(correctedSteps,  (uint8_t *)4, actualNumSteps);
+					eeprom_write_byte((uint8_t *)NUM_SOLVED_STEPS_KEY, actualNumSteps);
+					
+					for(int i = 0; i < actualNumSteps; ++i) {
+						eeprom_write_byte((uint8_t *)(SOLVED_STEPS_KEY + i),correctedSteps[i]);
+					}
 					solved = 1;
-					pwmOff();
-					brake();
 				
 			
 			}
@@ -270,102 +277,110 @@ int main(void)
 					uint8_t options = (lightdark & 0b00010100);
 					forward(FAST); // move past the turn
 					
-					while(lightdark & 0b00000001) {
+					int lightdarkcount = 0; // extra error checking
+					while((lightdark & 0b00000001) && lightdarkcount < 50) {
 						getLightDark();
+						lightdarkcount++;
 					}
 					
+					if(!options) {
+						options = (lightdark & 0b00000100); // get whether there was the option to get forward
+					}
 					turnLeft(FAST);
 					
 					
-					int lightdarkcount = 0; // extra error checking
+					lightdarkcount = 0; // extra error checking
 					while((lightdark & 0b00000100) && lightdarkcount < 200) { // next turn until the middle sensor sees nothing
 						lightdarkcount++;
 						getLightDark();
 					} 
+					
 					lightdarkcount = 0;
-					while(!(lightdark & 0b00000010) && lightdarkcount < 250) {
-						lightdarkcount++;
-						getLightDark();
-					}
+					
 					// now turn until the middle sensor sees the path again
-					while(!(lightdark == 0b00000100)) {
+					while(!(lightdark & 0b00000100) && lightdarkcount < 200) {
 						getLightDark();
+						lightdarkcount++;
 					}
 					
 					if(options) { // only record the turn if there was the 
 						solvedSteps[stepCounter] = 0; // 0 for left turn
 						++stepCounter;
 					}
-					
-					// finishedturning = 0;
+				}
+					else if(lightdark & 0b00000100) {
+						forward(SLOW);
+					}
 					else if(lightdark & 0b00010000) {
+						
 						forward(FAST); // first move past the turn
 						while(lightdark & 0b00010000) {
 							getLightDark();
 							checkIfDone();
 						}
 						
-						if(lightdark & 0b00001110) {
+						if(lightdark & 0b00001111) { // if there are any options other than a right turn, take it
 							forward(SLOW);
 							solvedSteps[stepCounter++] = 2;
 						}
-						else {
+						else if(lightdark == 0x00) {
 							turnRight(FAST);
 							while(!(lightdark & 0b00000100)) {
 								getLightDark();
+								if(lightdark & 0b00000111) { // keep on checking to make sure there aren't other options
+									break;
+								}
 							}
 						}
+						
+						forward(SLOW);
 						getLightDark();
 						
 					}
-				}
-				else if(lightdark & 0b00000100) {
-					forward(MEDIUM);
 					
-				}
+					
 				
 				
-				
-				
-				
-			
-				
-			
-				else if(lightdark == 0b00000010) {
-					turnLeft(MEDIUM);
-				}
+				/*
 				else if(lightdark == 0b00001000) {
-					turnRight(MEDIUM);
+					turnRight(SLOW);
 				}
-			
+				else if(lightdark == 0b00000010) {
+					turnLeft(SLOW);
+				}
+				*/
+				
 				else if(lightdark == 0x00) {
-						if(lastLightDark == 0b00000100) {
-							
-							// u-turn
-							if(solvedSteps[stepCounter-1] !=1) { // don't double u-turn
-								solvedSteps[stepCounter++] = 1;
-								forward(FAST);
-								_delay_ms(500);
-							}
-						turnRight(MEDIUM);
-							
-							
-						}
-						else if(lastLightDark & 0b00011100) {
-							turnRight(FAST);
-							while(!(lightdark & 0b00000100)) {
-								getLightDark();
-							}
-						}
+					
+					
+					if(lastLightDark == 0b00000100) {
 						
-						else if(lastLightDark & 0b00000011) {
-							turnLeft(FAST);
-							while(!(lightdark & 0b00000100)) {
-								getLightDark();
-							}
+						// u-turn
+						if(solvedSteps[stepCounter-1] !=1) { // don't double u-turn
+							forward(SLOW);
+							_delay_ms(250);
+							solvedSteps[stepCounter++] = 1;
+							
 						}
+						turnLeft(MEDIUM);
+				
+					}
+					else if((lastLightDark & 0b00000011)) {
+						turnLeft(SLOW);
+						while(!(lightdark & 0b00000100)) {
+							getLightDark();
+						}
+					}
+					else if((lastLightDark & 0b00011000)) {
+						turnRight(SLOW);
+						while(!(lightdark & 0b00000100)) {
+							getLightDark();
+						}
+					}
 					
 					
+					
+
 					
 						lost = 1;
 
@@ -539,7 +554,16 @@ void getLightDark(void) {
 		}
 	}
 	testThreshold();
+	setUpSensing(); // set up sensing here lol
+	while(1) {
+		if(done == 5) {
+			cli();
+			break;
+		}
+	}
+	testThreshold();
 	checkIfDone();
+	
 }
 
 void checkIfDone() {
@@ -556,8 +580,8 @@ void checkIfDone() {
 	}
 }
 
-uint8_t * convertTurns(uint8_t * pre, int numTurns, int *postTurns) {
-	uint8_t post[100];
+uint8_t convertTurns(uint8_t * pre, uint8_t *post, uint8_t numTurns) {
+	uint8_t postTurns = 0;
 	while(numTurns >= 3) {
 		uint8_t one = pre[numTurns -1];
 		uint8_t two = pre[numTurns -2];
@@ -582,20 +606,21 @@ uint8_t * convertTurns(uint8_t * pre, int numTurns, int *postTurns) {
 				}
 			
 		}
-		post[99-*postTurns] = three;
-			(*postTurns)++;
-			numTurns-= 3;
+		post[99-postTurns] = three;
+			(postTurns)++;
+			numTurns--;;
 		}
-		else { // if no u-turns, put all of them in the post array
-			post[99 - *postTurns] = three;
-			(*postTurns)++;
+		else { // if no u-turns, put the top in the array
+			post[99 - postTurns] = three;
+			(postTurns)++;
 			numTurns--;
 		}
 	}
 	while(numTurns > 0) {
-		post[99-*postTurns] = pre[numTurns -1];
-		(*postTurns)++;
+		post[99-postTurns] = pre[numTurns -1];
+		(postTurns)++;
 		numTurns--;
 	}
-	return post;
+	post += (100-postTurns); // do some pointer arithmetic so that the array now starts at the first corrected turn
+	return postTurns;
 }
